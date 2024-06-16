@@ -48,9 +48,9 @@ static inline void ca_context_exit_cb(int, void *ctxp)
     ca_context_destroy(ctxp);
 }
 
-static inline void ca_context_play_cb(ca_context *, uint32_t, int, void *m_pid)
+static inline void ca_context_play_cb(ca_context *, uint32_t, int, void *tgid)
 {
-    syscall(SYS_tgkill, (intptr_t)m_pid, (intptr_t)m_pid, SIGINT);
+    syscall(SYS_tgkill, (intptr_t)tgid, (intptr_t)tgid, SIGINT);
 }
 
 int main(int argc, char *argv[])
@@ -71,11 +71,12 @@ int main(int argc, char *argv[])
 
     syscall(SYS_pipe2, sigfd, O_CLOEXEC | O_NONBLOCK);
     {
-        const int *sigp = (const int[7]){
+        const int *sigp = (const int[8]){
             SIGHUP,
             SIGINT,
             SIGUSR1,
             SIGUSR2,
+            SIGALRM,
             SIGTERM,
             SIGPOLL,
         };
@@ -131,7 +132,7 @@ int main(int argc, char *argv[])
         register int i = 2;
 
         do {
-            register const int fd = open(i ? _PATH_DEV "block" : p,
+            register const int fd = open(i ? _PATH_DEV "disk/by-uuid" : p,
                                          O_ASYNC | O_CLOEXEC | O_DIRECTORY);
             register int j = 1;
 
@@ -184,6 +185,10 @@ int main(int argc, char *argv[])
         case SIGPOLL:
             s = "screen-capture";
             n = sizeof "screen-capture";
+            break;
+        case SIGALRM:
+            s = "alarm-clock-elapsed";
+            n = sizeof "alarm-clock-elapsed";
             break;
         case SIGHUP:
         case SIGTERM:
