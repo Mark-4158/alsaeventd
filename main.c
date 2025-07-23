@@ -167,10 +167,9 @@ int main(int argc, char *argv[])
     n = sizeof "service-login";
     sigprocmask(SIG_UNBLOCK, ssetp, NULL);
 
-    for (;;) {
-        if (snd_ctl_read(ctlp, evp) <= 0)
-            goto CA_PLAY_EVENT;
-    }
+    snd_ctl_wait(ctlp, 5500);
+    while (snd_ctl_read(ctlp, evp) > 0) { }
+    goto CA_PLAY_EVENT;
 
     for (;;) {
         switch (read(sigfd[0], s = (int[1]){ }, sizeof(int)), *(const int *)s) {
