@@ -16,21 +16,23 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#include <canberra.h>
-#include <alsa/asoundlib.h>
-
-#include <sys/syscall.h>
-#include <paths.h>
 #include <fcntl.h>
+#include <paths.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/syscall.h>
 
-static volatile sig_atomic_t sigfd[2];
+#include <alsa/asoundlib.h>
+#include <canberra.h>
+
+
+static volatile sig_atomic_t sigfd;
+
 
 static inline void sa_handler_cb(int sig)
 {
-    write(sigfd[1], &sig, sizeof sig);
+    write(sigfd, &sig, sizeof sig);
 }
 
 static inline void ctl_exit_cb(int, void *ctlp)
@@ -53,12 +55,72 @@ static inline void ca_context_play_cb(ca_context *, uint32_t, int, void *tgid)
     syscall(SYS_tgkill, (intptr_t)tgid, (intptr_t)tgid, SIGINT);
 }
 
+static inline int sigfd_init(void)
+{
+    int pipefd[] = { -1, -1 };
+
+    syscall(SYS_pipe2, pipefd, O_CLOEXEC | O_NONBLOCK);
+    sigfd = pipefd[1];
+
+    return pipefd[0];
+}
+
+static inline void sigset_init(sigset_t *const set)
+{
+    const int sigv[] = {
+        SIGHUP,
+        SIGINT,
+        SIGURG,
+        SIGUSR1,
+        SIGUSR2,
+        SIGALRM,
+        SIGTERM,
+    };
+    register int i = sizeof sigv / sizeof *sigv;
+
+    struct sigaction sa[] = {
+        { .sa_handler = sa_handler_cb },
+    };
+
+    sigfillset(&sa->sa_mask);
+
+    sigemptyset(set);
+    do {
+        sigaddset(set, sigv[--i]);
+    } while (i);
+
+    i = sizeof sigv / sizeof *sigv;
+    do {
+        sigaction(sigv[--i], sa, NULL);
+    } while (i);
+}
+
+static void async_init(const char* const path)
+{
+    register int i = 2;
+
+    do {
+        register const int fd = open(i ? _PATH_DEV "disk/by-uuid" : path,
+                                     O_ASYNC | O_CLOEXEC | O_DIRECTORY);
+        register int j = 1;
+
+        do {
+            fcntl(fd,
+                  (static const int[]){ 0x402, 0xA }[j],
+                  (static const int[][3]){
+                      { 0x80000004, 0x80000008, 0x80000004 },
+                      { SIGURG, SIGUSR1, SIGUSR2 },
+                  }[j][i]);
+        } while (j--);
+    } while (i--);
+}
+
 int main(int argc, char *argv[])
 {
     void *s = "Yaru",
          *p = getenv("GRIM_DEFAULT_DIR"),
          *tgid = "alsa";
-    size_t n;
+    size_t n = sizeof "service-login";
 
     snd_ctl_t *ctlp = NULL;
     snd_ctl_event_t *evp = NULL;
@@ -66,49 +128,20 @@ int main(int argc, char *argv[])
     ca_proplist *propp = NULL;
     ca_context *ctxp = NULL;
 
-    sigset_t ssetp[1];
-    sigemptyset(ssetp);
+    const int sigfd = sigfd_init();
+    sigset_t setp[1];
 
-    syscall(SYS_pipe2, sigfd, O_CLOEXEC | O_NONBLOCK);
-    {
-        const int *sigp = (const int[8]){
-            SIGHUP,
-            SIGINT,
-            SIGUSR1,
-            SIGUSR2,
-            SIGALRM,
-            SIGTERM,
-            SIGPOLL,
-        };
+    sigset_init(setp);
+    sigprocmask(SIG_BLOCK, setp, NULL);
 
-        do {
-            if (!sigaddset(ssetp, *sigp)) {
-                struct sigaction actp[1];
-
-                sigaction(*sigp, NULL, actp);
-                actp->sa_handler = sa_handler_cb;
-                sigfillset(&actp->sa_mask);
-                sigdelset(&actp->sa_mask, *sigp);
-                sigaction(*sigp, actp, NULL);
-            }
-        } while (*++sigp);
-    }
-    sigprocmask(SIG_BLOCK, ssetp, NULL);
-
-    for (;;) {
-        switch (getopt(argc, argv, "t:d:b:h")) {
-        case -1:
-            break;
-        case 't':
+    for (register int opt; (opt = getopt(argc, argv, "ht:d:b:")) != -1;) {
+        if (opt == 't') {
             s = optarg;
-            continue;
-        case 'd':
+        } else if (opt == 'd') {
             p = optarg;
-            continue;
-        case 'b':
+        } else if (opt == 'b') {
             tgid = optarg;
-            continue;
-        case 'h':
+        } else if (opt == 'h') {
             printf("\n"
                    "Usage:\n"
                    " alsaeventd [options]\n"
@@ -121,31 +154,12 @@ int main(int argc, char *argv[])
                    " -h  display this help\n",
                    tgid, p, s);
             return EXIT_SUCCESS;
-        default:
+        } else {
             return EXIT_FAILURE;
         }
-
-        break;
     }
 
-    {
-        register int i = 2;
-
-        do {
-            register const int fd = open(i ? _PATH_DEV "disk/by-uuid" : p,
-                                         O_ASYNC | O_CLOEXEC | O_DIRECTORY);
-            register int j = 1;
-
-            do {
-                fcntl(fd,
-                      (const int[]){ 0x402, 0xA }[j],
-                      (const int[][3]){
-                          { 0x80000004, 0x80000008, 0x80000004 },
-                          { SIGPOLL, SIGUSR2, SIGUSR1 },
-                      }[j][i]);
-            } while (j--);
-        } while (i--);
-    }
+    async_init(p);
 
     snd_ctl_open(&ctlp, "default", SND_CTL_READONLY);
     on_exit(ctl_exit_cb, ctlp);
@@ -164,56 +178,53 @@ int main(int argc, char *argv[])
     s = "service-login";
     p = NULL;
     tgid = NULL;
-    n = sizeof "service-login";
-    sigprocmask(SIG_UNBLOCK, ssetp, NULL);
+    sigprocmask(SIG_UNBLOCK, setp, NULL);
+    sigdelset(setp, SIGINT);
 
-    snd_ctl_wait(ctlp, 5500);
-    while (snd_ctl_read(ctlp, evp) > 0) { }
+    do {
+        snd_ctl_wait(ctlp, 250);
+    } while (snd_ctl_read(ctlp, evp) > 0);
+
     goto CA_PLAY_EVENT;
-
     for (;;) {
-        switch (read(sigfd[0], s = (int[1]){ }, sizeof(int)), *(const int *)s) {
-        case SIGUSR1:
-            s = "device-added";
-            n = sizeof "device-added";
-            break;
-        case SIGUSR2:
-            s = "device-removed";
-            n = sizeof "device-removed";
-            break;
-        case SIGPOLL:
-            s = "screen-capture";
-            n = sizeof "screen-capture";
-            break;
-        case SIGALRM:
-            s = "alarm-clock-elapsed";
-            n = sizeof "alarm-clock-elapsed";
-            break;
-        case SIGHUP:
-        case SIGTERM:
+        int sig;
+
+        s = &sig;
+        n = sizeof sig;
+        for (ssize_t sz; (sz = read(sigfd, s, n)) &&
+                         (sz != -1 ? s += sz, n -= sz : errno == EINTR);) { }
+
+        if (n) {
+            if ((snd_ctl_wait(ctlp, -1), snd_ctl_read(ctlp, evp)) <= 0 ||
+                snd_ctl_event_get_type(evp) != SND_CTL_EVENT_ELEM ||
+                snd_ctl_event_elem_get_interface(evp) !=
+                    SND_CTL_ELEM_IFACE_MIXER ||
+                snd_ctl_event_elem_get_mask(evp) != SND_CTL_EVENT_MASK_VALUE) {
+                continue;
+            }
+            s = "audio-volume-change";
+            n = sizeof "audio-volume-change";
+        } else if (sig == SIGHUP || sig == SIGTERM) {
+            sigprocmask(SIG_BLOCK, setp, NULL);
             s = "service-logout";
             p = ca_context_play_cb;
             tgid = (void *)(intptr_t)getpid();
             n = sizeof "service-logout";
-            sigdelset(ssetp, SIGINT);
-            sigprocmask(SIG_BLOCK, ssetp, NULL);
-            lseek(sigfd[0], 0, SEEK_END);
-            break;
-        case SIGINT:
+        } else if (sig == SIGURG) {
+            s = "screen-capture";
+            n = sizeof "screen-capture";
+        } else if (sig == SIGUSR1) {
+            s = "device-added";
+            n = sizeof "device-added";
+        } else if (sig == SIGUSR2) {
+            s = "device-removed";
+            n = sizeof "device-removed";
+        } else if (sig == SIGALRM) {
+            s = "alarm-clock-elapsed";
+            n = sizeof "alarm-clock-elapsed";
+        } else if (sig == SIGINT) {
             return EXIT_SUCCESS;
-        case 0:
-            snd_ctl_wait(ctlp, -1);
-            if (snd_ctl_read(ctlp, evp) > 0 &&
-                snd_ctl_event_get_type(evp) == SND_CTL_EVENT_ELEM &&
-                snd_ctl_event_elem_get_interface(evp)
-                    == SND_CTL_ELEM_IFACE_MIXER &&
-                snd_ctl_event_elem_get_mask(evp) == SND_CTL_EVENT_MASK_VALUE) {
-                s = "audio-volume-change";
-                n = sizeof "audio-volume-change";
-                break;
-            }
-            [[fallthrough]];
-        default:
+        } else {
             continue;
         }
 
