@@ -50,9 +50,14 @@ static inline void ca_context_exit_cb(int, void *ctxp)
     ca_context_destroy(ctxp);
 }
 
+static inline int sys_kill(pid_t pid, int sig)
+{
+    return syscall(SYS_tgkill, pid, pid, sig);
+}
+
 static inline void ca_context_play_cb(ca_context *, uint32_t, int, void *tgid)
 {
-    syscall(SYS_tgkill, (intptr_t)tgid, (intptr_t)tgid, SIGINT);
+    sys_kill((intptr_t)tgid, SIGINT);
 }
 
 static inline int sigfd_init(void)
@@ -67,7 +72,7 @@ static inline int sigfd_init(void)
 
 static inline void sigset_init(sigset_t *const set)
 {
-    const int sigv[] = {
+    static const int sigv[] = {
         SIGHUP,
         SIGINT,
         SIGURG,
@@ -117,6 +122,8 @@ static void async_init(const char* const path)
 
 int main(int argc, char *argv[])
 {
+    pid_t ppgid = -1;
+
     void *s = "Yaru",
          *p = getenv("GRIM_DEFAULT_DIR"),
          *tgid = "alsa";
@@ -134,8 +141,10 @@ int main(int argc, char *argv[])
     sigset_init(setp);
     sigprocmask(SIG_BLOCK, setp, NULL);
 
-    for (register int opt; (opt = getopt(argc, argv, "ht:d:b:")) != -1;) {
-        if (opt == 't') {
+    for (register int opt; (opt = getopt(argc, argv, "+kht:d:b:")) != -1;) {
+        if (opt == 'k') {
+            ppgid = getpgid(getppid());
+        } else if (opt == 't') {
             s = optarg;
         } else if (opt == 'd') {
             p = optarg;
@@ -151,6 +160,7 @@ int main(int argc, char *argv[])
                    " -d <dir>   pick screenshots path to watch (default: '%s')\n"
                    " -t <name>  pick XDG sound theme (default: '%s')\n"
                    " \n"
+                   " -k  kill the parent process group when killed\n"
                    " -h  display this help\n",
                    tgid, p, s);
             return EXIT_SUCCESS;
@@ -181,11 +191,12 @@ int main(int argc, char *argv[])
     sigprocmask(SIG_UNBLOCK, setp, NULL);
     sigdelset(setp, SIGINT);
 
-    do {
+    snd_ctl_wait(ctlp, -1);
+    while (snd_ctl_read(ctlp, evp) > 0) {
         snd_ctl_wait(ctlp, 250);
-    } while (snd_ctl_read(ctlp, evp) > 0);
-
+    }
     goto CA_PLAY_EVENT;
+
     for (;;) {
         int sig;
 
@@ -223,6 +234,9 @@ int main(int argc, char *argv[])
             s = "alarm-clock-elapsed";
             n = sizeof "alarm-clock-elapsed";
         } else if (sig == SIGINT) {
+            if (ppgid > 1) {
+                kill(-ppgid, SIGHUP);
+            }
             return EXIT_SUCCESS;
         } else {
             continue;
